@@ -23,6 +23,15 @@ public class SiegeBreakers : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
+		// Online: EOS login, lobbies and join codes (Networking/)
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"CoreOnline",
+			"OnlineServicesInterface",
+			"OnlineServicesEpicCommon",
+			"EOSShared",
+			"EOSSDK"
+		});
+
 		PublicIncludePaths.AddRange(new string[] {
 			"SiegeBreakers",
 			"SiegeBreakers/Variant_Platforming",

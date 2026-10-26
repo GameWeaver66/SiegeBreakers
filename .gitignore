@@ -56,3 +56,5 @@ Build/*/**
 *.app
 *.ipa
 *.pdb
+# Local-only secrets (EOS Client Secret). Each teammate makes their own.
+Config/UserEngine.ini
