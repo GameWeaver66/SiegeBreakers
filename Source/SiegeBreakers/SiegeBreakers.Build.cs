@@ -18,10 +18,20 @@ public class SiegeBreakers : ModuleRules
 			"StateTreeModule",
 			"GameplayStateTreeModule",
 			"UMG",
-			"Slate"
+			"Slate",
+			"SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
+
+		// Online: EOS login, lobbies and join codes (Networking/)
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"CoreOnline",
+			"OnlineServicesInterface",
+			"OnlineServicesEpicCommon",
+			"EOSShared",
+			"EOSSDK"
+		});
 
 		PublicIncludePaths.AddRange(new string[] {
 			"SiegeBreakers",
