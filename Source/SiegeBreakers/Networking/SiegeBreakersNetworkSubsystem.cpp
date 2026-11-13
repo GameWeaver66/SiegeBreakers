@@ -9,9 +9,11 @@
 #include "IEOSSDKManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
+#include "TimerManager.h"
 #include "Online/Auth.h"
 #include "Online/Lobbies.h"
 #include "Online/OnlineServices.h"
+#include "Online/OnlineServicesEngineUtils.h"
 #include "Online/OnlineServicesEpicCommon.h"
 #include "eos_connect.h"
 #include "eos_sdk.h"
@@ -29,6 +31,21 @@ namespace SiegeNet
 
 	/** On-screen message slot for the join code, so it stays up instead of scrolling away */
 	constexpr int32 JoinCodeMessageKey = 4242;
+
+	/**
+	 *  Shared by every game window in this process (only matters in the editor, where PIE runs all windows in one).
+	 *  All windows on one PC share one EOS Device ID, so they would all log in as the same player and a window
+	 *  could not join its own host. To get separate players, windows log in one at a time, and every window after
+	 *  the first throws the shared Device ID away and makes a new one (a new anonymous player) before logging in.
+	 *  Windows that already logged in stay logged in as their old player.
+	 */
+	const USiegeBreakersNetworkSubsystem* DeviceIdLoginOwner = nullptr;
+	int32 LoggedInWindows = 0;
+
+	/** The engine's normal network driver, put back when no window is using EOS any more */
+	int32 EOSNetDriverUsers = 0;
+	FString OriginalDriverClass;
+	FString OriginalDriverFallback;
 
 	USiegeBreakersNetworkSubsystem* GetSubsystem(UWorld* World)
 	{
@@ -75,6 +92,12 @@ void USiegeBreakersNetworkSubsystem::Initialize(FSubsystemCollectionBase& Collec
 {
 	Super::Initialize(Collection);
 
+	// Each PIE window has its own world context, and gets its own EOS connection named after it
+	if (const FWorldContext* WorldContext = GetGameInstance()->GetWorldContext())
+	{
+		OnlineInstanceName = GetServicesEngineUtils()->GetOnlineIdentifier(*WorldContext);
+	}
+
 	// In the editor, PIE runs every player in one process, so skip the automatic login there
 	if (!GIsEditor)
 	{
@@ -85,6 +108,31 @@ void USiegeBreakersNetworkSubsystem::Initialize(FSubsystemCollectionBase& Collec
 void USiegeBreakersNetworkSubsystem::Deinitialize()
 {
 	LeaveLobby();
+
+	GetGameInstance()->GetTimerManager().ClearTimer(LoginRetryTimer);
+
+	if (SiegeNet::DeviceIdLoginOwner == this)
+	{
+		SiegeNet::DeviceIdLoginOwner = nullptr;
+	}
+
+	if (bLoggedIn)
+	{
+		--SiegeNet::LoggedInWindows;
+	}
+
+	// Put the normal network driver back once nobody uses EOS, so later plain PIE multiplayer tests use IP again
+	if (bUsingEOSNetDriver && --SiegeNet::EOSNetDriverUsers == 0 && GEngine)
+	{
+		for (FNetDriverDefinition& Definition : GEngine->NetDriverDefinitions)
+		{
+			if (Definition.DefName == NAME_GameNetDriver)
+			{
+				Definition.DriverClassName = FName(*SiegeNet::OriginalDriverClass);
+				Definition.DriverClassNameFallback = FName(*SiegeNet::OriginalDriverFallback);
+			}
+		}
+	}
 
 	Super::Deinitialize();
 }
@@ -104,20 +152,35 @@ void USiegeBreakersNetworkSubsystem::Login()
 	CreateDeviceId();
 }
 
+TSharedPtr<IOnlineServices> USiegeBreakersNetworkSubsystem::GetOnlineServices() const
+{
+	return GetServices(EOnlineServices::Epic, OnlineInstanceName);
+}
+
 void USiegeBreakersNetworkSubsystem::CreateDeviceId()
 {
-	TSharedPtr<FOnlineServicesEpicCommon> Services = StaticCastSharedPtr<FOnlineServicesEpicCommon>(GetServices(EOnlineServices::Epic));
+	// Another PIE window is logging in right now: wait for it, then try again (see SiegeNet::DeviceIdLoginOwner)
+	if (SiegeNet::DeviceIdLoginOwner && SiegeNet::DeviceIdLoginOwner != this)
+	{
+		GetGameInstance()->GetTimerManager().SetTimer(LoginRetryTimer, this, &USiegeBreakersNetworkSubsystem::CreateDeviceId, 0.5f, false);
+		return;
+	}
+
+	TSharedPtr<FOnlineServicesEpicCommon> Services = StaticCastSharedPtr<FOnlineServicesEpicCommon>(GetOnlineServices());
 	if (!Services || !Services->GetEOSPlatformHandle())
 	{
 		FinishLogin(false, TEXT("EOS is not available. Check the [EOSSDK.Platform.SiegeBreakers] config and Config/UserEngine.ini"));
 		return;
 	}
 
+	SiegeNet::DeviceIdLoginOwner = this;
 	EOS_HConnect ConnectHandle = EOS_Platform_GetConnectInterface(*Services->GetEOSPlatformHandle());
 
-	// Testing aid: two copies of the game on one PC share a Device ID, so they would be the same player.
-	// Start the second copy with -SBNewDeviceId to throw its Device ID away and get a new player identity.
-	if (FParse::Param(FCommandLine::Get(), TEXT("SBNewDeviceId")))
+	// Two copies of the game on one PC share a Device ID, so they would be the same player.
+	// - In the editor, every PIE window after the first one gets a new Device ID automatically.
+	// - Separate game copies: start the second one with -SBNewDeviceId.
+	const bool bNeedNewPlayer = FParse::Param(FCommandLine::Get(), TEXT("SBNewDeviceId")) || (GIsEditor && SiegeNet::LoggedInWindows > 0);
+	if (bNeedNewPlayer)
 	{
 		EOS_Connect_DeleteDeviceIdOptions DeleteOptions = {};
 		DeleteOptions.ApiVersion = EOS_CONNECT_DELETEDEVICEID_API_LATEST;
@@ -137,7 +200,7 @@ void EOS_CALL USiegeBreakersNetworkSubsystem::HandleDeleteDeviceIdComplete(const
 	USiegeBreakersNetworkSubsystem* Subsystem = static_cast<USiegeBreakersNetworkSubsystem*>(Data->ClientData);
 	UE_LOG(LogSiegeNet, Log, TEXT("Deleted old Device ID: %hs"), EOS_EResult_ToString(Data->ResultCode));
 
-	TSharedPtr<FOnlineServicesEpicCommon> Services = StaticCastSharedPtr<FOnlineServicesEpicCommon>(GetServices(EOnlineServices::Epic));
+	TSharedPtr<FOnlineServicesEpicCommon> Services = StaticCastSharedPtr<FOnlineServicesEpicCommon>(Subsystem->GetOnlineServices());
 	EOS_HConnect ConnectHandle = EOS_Platform_GetConnectInterface(*Services->GetEOSPlatformHandle());
 
 	EOS_Connect_CreateDeviceIdOptions Options = {};
@@ -163,7 +226,7 @@ void EOS_CALL USiegeBreakersNetworkSubsystem::HandleCreateDeviceIdComplete(const
 
 void USiegeBreakersNetworkSubsystem::LoginWithDeviceId()
 {
-	IAuthPtr Auth = GetServices(EOnlineServices::Epic)->GetAuthInterface();
+	IAuthPtr Auth = GetOnlineServices()->GetAuthInterface();
 
 	// The Device ID login has no token: EOS finds the ID saved on this PC by CreateDeviceId.
 	// The first time a PC logs in, the engine also creates its EOS player account for us.
@@ -190,6 +253,16 @@ void USiegeBreakersNetworkSubsystem::FinishLogin(bool bWasSuccessful, const FStr
 {
 	bLoginInProgress = false;
 	bLoggedIn = bWasSuccessful;
+
+	// Let the next PIE window log in
+	if (SiegeNet::DeviceIdLoginOwner == this)
+	{
+		SiegeNet::DeviceIdLoginOwner = nullptr;
+	}
+	if (bWasSuccessful)
+	{
+		++SiegeNet::LoggedInWindows;
+	}
 
 	if (bWasSuccessful)
 	{
@@ -242,7 +315,7 @@ void USiegeBreakersNetworkSubsystem::HostGame()
 
 	ShowMessage(TEXT("Creating lobby..."));
 
-	GetServices(EOnlineServices::Epic)->GetLobbiesInterface()->CreateLobby(MoveTemp(Params)).OnComplete(this, [this, Code](const TOnlineResult<FCreateLobby>& Result)
+	GetOnlineServices()->GetLobbiesInterface()->CreateLobby(MoveTemp(Params)).OnComplete(this, [this, Code](const TOnlineResult<FCreateLobby>& Result)
 	{
 		bBusy = false;
 
@@ -301,7 +374,7 @@ void USiegeBreakersNetworkSubsystem::JoinGame(const FString& JoinCode)
 
 	ShowMessage(FString::Printf(TEXT("Looking for game %s..."), *Code));
 
-	ILobbiesPtr Lobbies = GetServices(EOnlineServices::Epic)->GetLobbiesInterface();
+	ILobbiesPtr Lobbies = GetOnlineServices()->GetLobbiesInterface();
 	Lobbies->FindLobbies(MoveTemp(Params)).OnComplete(this, [this, Code](const TOnlineResult<FFindLobbies>& FindResult)
 	{
 		if (FindResult.IsError() || FindResult.GetOkValue().Lobbies.IsEmpty())
@@ -317,7 +390,7 @@ void USiegeBreakersNetworkSubsystem::JoinGame(const FString& JoinCode)
 		JoinParams.LocalName = SiegeNet::LobbyLocalName;
 		JoinParams.LobbyId = FindResult.GetOkValue().Lobbies[0]->LobbyId;
 
-		GetServices(EOnlineServices::Epic)->GetLobbiesInterface()->JoinLobby(MoveTemp(JoinParams)).OnComplete(this, [this, Code](const TOnlineResult<FJoinLobby>& JoinResult)
+		GetOnlineServices()->GetLobbiesInterface()->JoinLobby(MoveTemp(JoinParams)).OnComplete(this, [this, Code](const TOnlineResult<FJoinLobby>& JoinResult)
 		{
 			bBusy = false;
 
@@ -342,7 +415,7 @@ void USiegeBreakersNetworkSubsystem::TravelToLobbyHost(FLobbyId LobbyId)
 	Params.LocalAccountId = LocalAccountId;
 	Params.LobbyId = LobbyId;
 
-	TOnlineResult<FGetResolvedConnectString> Result = GetServices(EOnlineServices::Epic)->GetResolvedConnectString(MoveTemp(Params));
+	TOnlineResult<FGetResolvedConnectString> Result = GetOnlineServices()->GetResolvedConnectString(MoveTemp(Params));
 	APlayerController* PlayerController = GetGameInstance()->GetFirstLocalPlayerController();
 
 	if (Result.IsError() || !PlayerController)
@@ -371,7 +444,7 @@ void USiegeBreakersNetworkSubsystem::LeaveLobby()
 		return;
 	}
 
-	if (IOnlineServicesPtr Services = GetServices(EOnlineServices::Epic))
+	if (IOnlineServicesPtr Services = GetOnlineServices())
 	{
 		FLeaveLobby::Params Params;
 		Params.LocalAccountId = LocalAccountId;
@@ -390,12 +463,23 @@ void USiegeBreakersNetworkSubsystem::LeaveLobby()
 
 void USiegeBreakersNetworkSubsystem::UseEOSNetDriver()
 {
+	if (bUsingEOSNetDriver)
+	{
+		return;
+	}
+	bUsingEOSNetDriver = true;
+
 	// The default network driver (set in BaseEngine.ini) is plain IP. Swapping it here, at runtime, means only
 	// games hosted or joined through EOS use the peer-to-peer relay. Unreal creates the driver when the map opens.
 	for (FNetDriverDefinition& Definition : GEngine->NetDriverDefinitions)
 	{
 		if (Definition.DefName == NAME_GameNetDriver)
 		{
+			if (SiegeNet::EOSNetDriverUsers++ == 0)
+			{
+				SiegeNet::OriginalDriverClass = Definition.DriverClassName.ToString();
+				SiegeNet::OriginalDriverFallback = Definition.DriverClassNameFallback.ToString();
+			}
 			Definition.DriverClassName = TEXT("/Script/SocketSubsystemEOS.NetDriverEOS");
 			Definition.DriverClassNameFallback = TEXT("/Script/OnlineSubsystemUtils.IpNetDriver");
 		}

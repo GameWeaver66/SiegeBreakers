@@ -4,9 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Engine/EngineTypes.h"
 #include "Online/CoreOnline.h"
 #include "eos_connect_types.h"
 #include "SiegeBreakersNetworkSubsystem.generated.h"
+
+namespace UE::Online { class IOnlineServices; }
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSiegeLoginComplete, bool, bWasSuccessful);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSiegeHostComplete, bool, bWasSuccessful, const FString&, JoinCode);
@@ -65,11 +68,18 @@ protected:
 
 	/** Map the host opens and everyone plays on */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
-	FString GameMapPath = TEXT("/Game/ThirdPerson/Lvl_ThirdPerson");
+	FString GameMapPath = TEXT("/Game/SiegeBreakers/Maps/MainGame");
 
 	/** Most players allowed in one game */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
 	int32 MaxPlayers = 8;
+
+	/**
+	 *  The EOS connection for this game window. Normally there is one, but when the editor plays with several
+	 *  windows (Play In Editor), each window gets its own, named after its PIE world. The engine's EOS network
+	 *  driver looks them up by that same name, so every EOS call here must go through this.
+	 */
+	TSharedPtr<UE::Online::IOnlineServices> GetOnlineServices() const;
 
 	/** Step 1 of login: make sure this PC has an EOS Device ID (created once, then reused) */
 	void CreateDeviceId();
@@ -98,6 +108,12 @@ protected:
 	/** Shows a message on screen and in the log */
 	void ShowMessage(const FString& Message, bool bIsError = false) const;
 
+	/** Name of this window's EOS connection: empty in a normal game, "Context_N" for each PIE window */
+	FName OnlineInstanceName;
+
+	/** Retries login a moment later while another PIE window is in the middle of its own login */
+	FTimerHandle LoginRetryTimer;
+
 	UE::Online::FAccountId LocalAccountId;
 	UE::Online::FLobbyId CurrentLobbyId;
 	FString CurrentJoinCode;
@@ -105,4 +121,5 @@ protected:
 	bool bLoggedIn = false;
 	bool bLoginInProgress = false;
 	bool bBusy = false;
+	bool bUsingEOSNetDriver = false;
 };
