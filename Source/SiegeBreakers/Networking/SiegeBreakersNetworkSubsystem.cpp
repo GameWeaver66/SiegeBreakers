@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Networking/SiegeBreakersNetworkSubsystem.h"
+#include "Networking/SiegeBreakersMenuGameMode.h"
+#include "EngineUtils.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -98,6 +100,8 @@ void USiegeBreakersNetworkSubsystem::Initialize(FSubsystemCollectionBase& Collec
 		OnlineInstanceName = GetServicesEngineUtils()->GetOnlineIdentifier(*WorldContext);
 	}
 
+	FCoreUObjectDelegates::PostLoadMapWithWorld.AddUObject(this, &USiegeBreakersNetworkSubsystem::HandlePostLoadMap);
+
 	// In the editor, PIE runs every player in one process, so skip the automatic login there
 	if (!GIsEditor)
 	{
@@ -107,9 +111,12 @@ void USiegeBreakersNetworkSubsystem::Initialize(FSubsystemCollectionBase& Collec
 
 void USiegeBreakersNetworkSubsystem::Deinitialize()
 {
+	FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
+
 	LeaveLobby();
 
 	GetGameInstance()->GetTimerManager().ClearTimer(LoginRetryTimer);
+	GetGameInstance()->GetTimerManager().ClearTimer(ReturnToMenuTimer);
 
 	if (SiegeNet::DeviceIdLoginOwner == this)
 	{
@@ -432,6 +439,55 @@ void USiegeBreakersNetworkSubsystem::TravelToLobbyHost(FLobbyId LobbyId)
 	PlayerController->ClientTravel(Address, TRAVEL_Absolute);
 
 	OnJoinComplete.Broadcast(true);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Leaving
+
+void USiegeBreakersNetworkSubsystem::ReturnToMainMenu()
+{
+	if (GetGameInstance()->GetTimerManager().IsTimerActive(ReturnToMenuTimer))
+	{
+		return;
+	}
+
+	LeaveLobby();
+
+	UWorld* World = GetGameInstance()->GetWorld();
+	if (World && World->GetNetMode() == NM_ListenServer)
+	{
+		// We are the host. Tell every other player's game to go back to its main menu: this is a built-in
+		// player controller message, and on their side it ends up loading the default map (MainMenu).
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* PlayerController = It->Get();
+			if (PlayerController && !PlayerController->IsLocalController())
+			{
+				PlayerController->ClientReturnToMainMenuWithTextReason(FText::FromString(TEXT("The host ended the game")));
+			}
+		}
+
+		// Give that message a moment to reach them before our game (the server) closes
+		GetGameInstance()->GetTimerManager().SetTimer(ReturnToMenuTimer, this, &USiegeBreakersNetworkSubsystem::OpenMainMenu, 0.5f, false);
+		return;
+	}
+
+	// A client (or offline): just load the menu. That also closes our connection to the host.
+	OpenMainMenu();
+}
+
+void USiegeBreakersNetworkSubsystem::OpenMainMenu()
+{
+	UGameplayStatics::OpenLevel(GetGameInstance(), FName(*MenuMapPath));
+}
+
+void USiegeBreakersNetworkSubsystem::HandlePostLoadMap(UWorld* LoadedWorld)
+{
+	// Every PIE window gets this broadcast, so only react to our own window's world
+	if (LoadedWorld && LoadedWorld->GetGameInstance() == GetGameInstance() && LoadedWorld->GetAuthGameMode<ASiegeBreakersMenuGameMode>())
+	{
+		LeaveLobby();
+	}
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

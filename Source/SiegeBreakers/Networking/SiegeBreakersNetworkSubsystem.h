@@ -47,6 +47,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Networking")
 	void JoinGame(const FString& JoinCode);
 
+	/**
+	 *  Leaves the current game and goes back to the main menu.
+	 *  If we are the host, every other player is sent back to the main menu too (the game ends).
+	 */
+	UFUNCTION(BlueprintCallable, Category="Networking")
+	void ReturnToMainMenu();
+
 	/** True once EOS login has succeeded */
 	UFUNCTION(BlueprintPure, Category="Networking")
 	bool IsLoggedIn() const { return bLoggedIn; }
@@ -69,6 +76,10 @@ protected:
 	/** Map the host opens and everyone plays on */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
 	FString GameMapPath = TEXT("/Game/SiegeBreakers/Maps/MainGame");
+
+	/** The main menu map */
+	UPROPERTY(EditDefaultsOnly, Category="Networking")
+	FString MenuMapPath = TEXT("/Game/SiegeBreakers/Maps/MainMenu");
 
 	/** Most players allowed in one game */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
@@ -96,6 +107,12 @@ protected:
 	/** Connects to the owner of a lobby we have joined */
 	void TravelToLobbyHost(UE::Online::FLobbyId LobbyId);
 
+	/** Opens the main menu map (no longer hosting or connected) */
+	void OpenMainMenu();
+
+	/** Runs after every map load: arriving on the main menu (by choice or because the host left) means we left the lobby */
+	void HandlePostLoadMap(UWorld* LoadedWorld);
+
 	/** Leaves the lobby we are in, if any */
 	void LeaveLobby();
 
@@ -113,6 +130,9 @@ protected:
 
 	/** Retries login a moment later while another PIE window is in the middle of its own login */
 	FTimerHandle LoginRetryTimer;
+
+	/** Short wait between telling clients the game is over and closing the host's game */
+	FTimerHandle ReturnToMenuTimer;
 
 	UE::Online::FAccountId LocalAccountId;
 	UE::Online::FLobbyId CurrentLobbyId;
