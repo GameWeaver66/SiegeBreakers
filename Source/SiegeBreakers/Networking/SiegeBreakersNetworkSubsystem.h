@@ -4,9 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Engine/EngineTypes.h"
 #include "Online/CoreOnline.h"
 #include "eos_connect_types.h"
 #include "SiegeBreakersNetworkSubsystem.generated.h"
+
+namespace UE::Online { class IOnlineServices; }
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSiegeLoginComplete, bool, bWasSuccessful);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSiegeHostComplete, bool, bWasSuccessful, const FString&, JoinCode);
@@ -44,6 +47,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Networking")
 	void JoinGame(const FString& JoinCode);
 
+	/**
+	 *  Leaves the current game and goes back to the main menu.
+	 *  If we are the host, every other player is sent back to the main menu too (the game ends).
+	 */
+	UFUNCTION(BlueprintCallable, Category="Networking")
+	void ReturnToMainMenu();
+
 	/** True once EOS login has succeeded */
 	UFUNCTION(BlueprintPure, Category="Networking")
 	bool IsLoggedIn() const { return bLoggedIn; }
@@ -65,11 +75,22 @@ protected:
 
 	/** Map the host opens and everyone plays on */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
-	FString GameMapPath = TEXT("/Game/ThirdPerson/Lvl_ThirdPerson");
+	FString GameMapPath = TEXT("/Game/SiegeBreakers/Maps/MainGame");
+
+	/** The main menu map */
+	UPROPERTY(EditDefaultsOnly, Category="Networking")
+	FString MenuMapPath = TEXT("/Game/SiegeBreakers/Maps/MainMenu");
 
 	/** Most players allowed in one game */
 	UPROPERTY(EditDefaultsOnly, Category="Networking")
 	int32 MaxPlayers = 8;
+
+	/**
+	 *  The EOS connection for this game window. Normally there is one, but when the editor plays with several
+	 *  windows (Play In Editor), each window gets its own, named after its PIE world. The engine's EOS network
+	 *  driver looks them up by that same name, so every EOS call here must go through this.
+	 */
+	TSharedPtr<UE::Online::IOnlineServices> GetOnlineServices() const;
 
 	/** Step 1 of login: make sure this PC has an EOS Device ID (created once, then reused) */
 	void CreateDeviceId();
@@ -86,6 +107,12 @@ protected:
 	/** Connects to the owner of a lobby we have joined */
 	void TravelToLobbyHost(UE::Online::FLobbyId LobbyId);
 
+	/** Opens the main menu map (no longer hosting or connected) */
+	void OpenMainMenu();
+
+	/** Runs after every map load: arriving on the main menu (by choice or because the host left) means we left the lobby */
+	void HandlePostLoadMap(UWorld* LoadedWorld);
+
 	/** Leaves the lobby we are in, if any */
 	void LeaveLobby();
 
@@ -98,6 +125,15 @@ protected:
 	/** Shows a message on screen and in the log */
 	void ShowMessage(const FString& Message, bool bIsError = false) const;
 
+	/** Name of this window's EOS connection: empty in a normal game, "Context_N" for each PIE window */
+	FName OnlineInstanceName;
+
+	/** Retries login a moment later while another PIE window is in the middle of its own login */
+	FTimerHandle LoginRetryTimer;
+
+	/** Short wait between telling clients the game is over and closing the host's game */
+	FTimerHandle ReturnToMenuTimer;
+
 	UE::Online::FAccountId LocalAccountId;
 	UE::Online::FLobbyId CurrentLobbyId;
 	FString CurrentJoinCode;
@@ -105,4 +141,5 @@ protected:
 	bool bLoggedIn = false;
 	bool bLoginInProgress = false;
 	bool bBusy = false;
+	bool bUsingEOSNetDriver = false;
 };

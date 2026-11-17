@@ -29,6 +29,7 @@ public class SiegeBreakers : ModuleRules
 			"CoreOnline",
 			"OnlineServicesInterface",
 			"OnlineServicesEpicCommon",
+			"OnlineSubsystemUtils",
 			"EOSShared",
 			"EOSSDK"
 		});
